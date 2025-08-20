@@ -1,0 +1,54 @@
+{
+  "name": "crypto-trader-mcp-revolutionary",
+  "version": "2.0.0",
+  "description": "Revolutionary AI-Powered Crypto Trading Bot via MCP Protocol - Modular Architecture",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node src/server.js",
+    "test": "node test/client.js",
+    "lint": "echo 'No linting configured yet'",
+    "docs": "echo 'Documentation in README.md'"
+  },
+  "keywords": [
+    "mcp", 
+    "crypto", 
+    "trading", 
+    "bitcoin", 
+    "ethereum", 
+    "ai", 
+    "claude",
+    "revolutionary",
+    "paper-trading",
+    "modular",
+    "architecture"
+  ],
+  "author": "Humber - Pioneer of Conversational Crypto Trading",
+  "license": "MIT",
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "node-cache": "^5.1.2"
+  },
+  "devDependencies": {},
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/humber/crypto-trader-mcp-revolutionary"
+  },
+  "bugs": {
+    "url": "https://github.com/humber/crypto-trader-mcp-revolutionary/issues"
+  },
+  "homepage": "https://github.com/humber/crypto-trader-mcp-revolutionary#readme",
+  "directories": {
+    "lib": "src",
+    "test": "test",
+    "doc": "docs"
+  },
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE"
+  ]
+}
