@@ -22,10 +22,20 @@ class WebServer {
   setupRoutes() {
     // Health check
     this.app.get('/health', (req, res) => {
+      const exchangeStatus = this.tradingServer.exchange ? this.tradingServer.exchange.getStatus() : null;
+      const notificationStatus = this.tradingServer.notifier ? this.tradingServer.notifier.getConfig() : null;
+
       res.json({
         status: 'ok',
         timestamp: new Date().toISOString(),
-        uptime: process.uptime()
+        uptime: process.uptime(),
+        exchange: exchangeStatus,
+        notifications: notificationStatus,
+        portfolio: {
+          total_value: this.tradingServer.getPortfolio().total_value,
+          balance: this.tradingServer.getPortfolio().balance_usd,
+          positions: Object.keys(this.tradingServer.getPortfolio().positions).length
+        }
       });
     });
 
