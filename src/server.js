@@ -9,6 +9,7 @@ const PricesManager = require('./market/prices');
 const WebServer = require('./web-server');
 const ExchangeFactory = require('./exchange/exchange-factory');
 const TelegramNotifier = require('./notifications/telegram-notifier');
+const TradingAgent = require('./ai/trading-agent');
 const config = require('./utils/config');
 
 class CryptoTradingServer {
@@ -26,6 +27,7 @@ class CryptoTradingServer {
     this.webServer = null;
     this.exchange = null;
     this.notifier = null;
+    this.tradingAgent = null;
 
     // Estado do servidor
     this.portfolio = null;
@@ -69,6 +71,11 @@ class CryptoTradingServer {
 
       // 7. Setup de shutdown gracioso
       this.setupShutdownHandlers();
+
+      // 8. Start AI Trading Agent if enabled
+      if (this.tradingAgent && this.tradingAgent.enabled) {
+        await this.tradingAgent.start();
+      }
 
       console.error('✅ Servidor iniciado com sucesso!');
       console.error(`💰 Portfolio: $${this.portfolio.total_value.toFixed(2)}`);
@@ -154,6 +161,30 @@ class CryptoTradingServer {
       onPortfolioUpdate: this.handlePortfolioUpdate.bind(this),
       onStatsUpdate: this.handleStatsUpdate.bind(this)
     });
+
+    // Initialize AI Trading Agent
+    const aiStrategy = process.env.AI_STRATEGY || 'BALANCED';
+    const aiEnabled = process.env.AI_TRADING_ENABLED === 'true';
+    const aiCheckInterval = parseInt(process.env.AI_CHECK_INTERVAL_HOURS || '6') * 60 * 60 * 1000;
+
+    this.tradingAgent = new TradingAgent({
+      pricesManager: this.pricesManager,
+      toolsHandler: this.toolsHandler,
+      portfolio: this.portfolio,
+      storage: this.storage,
+      notifier: this.notifier,
+      strategy: aiStrategy,
+      enabled: aiEnabled,
+      checkInterval: aiCheckInterval
+    });
+
+    // Auto-start AI trading if enabled
+    if (aiEnabled) {
+      console.error('\n🤖 AI Trading Agent configuration:');
+      console.error(`   Strategy: ${aiStrategy}`);
+      console.error(`   Check interval: ${aiCheckInterval / (60 * 60 * 1000)}h`);
+      console.error(`   Auto-start: ${aiEnabled}`);
+    }
 
     console.error('✅ Handlers especializados inicializados');
   }
@@ -422,6 +453,11 @@ class CryptoTradingServer {
   async shutdown() {
     try {
       console.error('📊 Salvando dados finais...');
+
+      // Shutdown AI trading agent
+      if (this.tradingAgent && this.tradingAgent.isRunning) {
+        this.tradingAgent.stop();
+      }
 
       // Shutdown web server
       if (this.webServer) {

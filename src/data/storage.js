@@ -257,6 +257,69 @@ class DataStorage {
     }
   }
 
+  // AI Trading Agent analysis storage
+  async saveAnalysis(analysis) {
+    try {
+      const analysisDir = path.join(this.dataPath, 'ai-analysis');
+      await fs.mkdir(analysisDir, { recursive: true });
+
+      // Save individual analysis with timestamp
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const analysisPath = path.join(analysisDir, `analysis-${timestamp}.json`);
+
+      await fs.writeFile(
+        analysisPath,
+        JSON.stringify(analysis, null, 2)
+      );
+
+      // Also save to latest analysis file for quick access
+      const latestPath = path.join(analysisDir, 'latest.json');
+      await fs.writeFile(
+        latestPath,
+        JSON.stringify(analysis, null, 2)
+      );
+
+      return true;
+    } catch (error) {
+      console.error('⚠️  Error saving AI analysis:', error.message);
+      return false;
+    }
+  }
+
+  async loadLatestAnalysis() {
+    try {
+      const latestPath = path.join(this.dataPath, 'ai-analysis', 'latest.json');
+      const data = await fs.readFile(latestPath, 'utf8');
+      return JSON.parse(data);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  async getAnalysisHistory(limit = 10) {
+    try {
+      const analysisDir = path.join(this.dataPath, 'ai-analysis');
+      const files = await fs.readdir(analysisDir);
+
+      // Filter out 'latest.json' and sort by timestamp (newest first)
+      const analysisFiles = files
+        .filter(f => f !== 'latest.json' && f.endsWith('.json'))
+        .sort()
+        .reverse()
+        .slice(0, limit);
+
+      const analyses = [];
+      for (const file of analysisFiles) {
+        const data = await fs.readFile(path.join(analysisDir, file), 'utf8');
+        analyses.push(JSON.parse(data));
+      }
+
+      return analyses;
+    } catch (error) {
+      return [];
+    }
+  }
+
   // Health check method
   async healthCheck() {
     try {
