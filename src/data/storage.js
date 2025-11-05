@@ -223,6 +223,40 @@ class DataStorage {
     }
   }
 
+  // Methods for pending orders
+  async loadPendingOrders() {
+    try {
+      const ordersPath = path.join(this.dataPath, 'pending_orders.json');
+      const data = await fs.readFile(ordersPath, 'utf8');
+      const parsed = JSON.parse(data);
+      return parsed.orders || [];
+    } catch (error) {
+      // Return empty array if file doesn't exist
+      return [];
+    }
+  }
+
+  async savePendingOrders(orders) {
+    try {
+      const ordersPath = path.join(this.dataPath, 'pending_orders.json');
+      const ordersData = {
+        orders: orders,
+        last_updated: new Date().toISOString(),
+        count: orders.length
+      };
+
+      await fs.writeFile(
+        ordersPath,
+        JSON.stringify(ordersData, null, 2)
+      );
+
+      return true;
+    } catch (error) {
+      console.error('⚠️ Error saving pending orders:', error.message);
+      throw error;
+    }
+  }
+
   // Health check method
   async healthCheck() {
     try {

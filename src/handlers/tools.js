@@ -2,6 +2,7 @@
 const axios = require('axios');
 const config = require('../utils/config');
 const Formatter = require('../utils/formatter');
+const { Validator, ValidationError } = require('../utils/validation');
 
 class ToolsHandler {
   constructor(dependencies) {
@@ -243,6 +244,21 @@ class ToolsHandler {
     } catch (error) {
       console.error(`❌ Erro na ferramenta ${name}:`, error.message);
       await this.storage.logError(error, `tool_${name}`);
+
+      // Handle validation errors specially
+      if (error instanceof ValidationError) {
+        const errorMsg = `❌ **Validation Error**\n\n${error.message}` +
+          (error.field ? `\n\n**Field:** ${error.field}` : '');
+
+        return {
+          content: [{
+            type: "text",
+            text: errorMsg
+          }],
+          isError: true
+        };
+      }
+
       throw error;
     }
   }
@@ -250,6 +266,9 @@ class ToolsHandler {
   // IMPLEMENTAÇÃO DAS FERRAMENTAS
 
   async getPrice(coin) {
+    // Validate coin input
+    coin = Validator.validateCoin(coin);
+
     const cacheKey = `price_${coin}`;
     let cached = this.cache.getPrice(cacheKey);
     
@@ -296,6 +315,10 @@ class ToolsHandler {
   }
 
   async analyzeCoin(coin, days = 7) {
+    // Validate inputs
+    coin = Validator.validateCoin(coin);
+    days = Validator.validateDays(days);
+
     const cacheKey = `analysis_${coin}_${days}`;
     let cached = this.cache.getAnalysis(cacheKey);
     
@@ -356,12 +379,29 @@ class ToolsHandler {
 
   async buyCrypto(coin, amountUsd, stopLoss = null, takeProfit = null) {
     try {
-      // Verificações de risco antes da compra
-      await this.validateTradeRisk(coin, amountUsd, 'buy');
-      
-      // Obter preço atual
+      // Get current price first for validation
       const priceData = await this.getCurrentPriceData(coin);
       const price = priceData.usd;
+
+      // Comprehensive input validation
+      const validated = Validator.validateBuyTrade(
+        coin,
+        amountUsd,
+        this.portfolio.balance_usd,
+        this.portfolio.total_value,
+        stopLoss,
+        takeProfit,
+        price
+      );
+
+      // Use validated values
+      coin = validated.coin;
+      amountUsd = validated.amount_usd;
+      stopLoss = validated.stop_loss;
+      takeProfit = validated.take_profit;
+
+      // Verificações de risco antes da compra
+      await this.validateTradeRisk(coin, amountUsd, 'buy');
       const fee = amountUsd * config.trading.trading_fee;
       const amountAfterFee = amountUsd - fee;
       const quantity = amountAfterFee / price;
@@ -385,14 +425,22 @@ class ToolsHandler {
       
       if (this.portfolio.positions[coin]) {
         // Posição existente - calcular preço médio
-        const existingValue = this.portfolio.positions[coin].quantity * this.portfolio.positions[coin].avg_price;
+        const existingPosition = this.portfolio.positions[coin];
+        const existingValue = existingPosition.quantity * existingPosition.avg_price;
         const newTotalValue = existingValue + amountAfterFee;
-        const newTotalQuantity = this.portfolio.positions[coin].quantity + quantity;
-        
+        const newTotalQuantity = existingPosition.quantity + quantity;
+
+        // Preserve stop_loss and take_profit from existing position
+        // Only update if new values are provided
+        const preservedStopLoss = stopLoss !== null ? stopLoss : existingPosition.stop_loss;
+        const preservedTakeProfit = takeProfit !== null ? takeProfit : existingPosition.take_profit;
+
         this.portfolio.positions[coin] = {
-          ...this.portfolio.positions[coin],
+          ...existingPosition,
           quantity: newTotalQuantity,
           avg_price: newTotalValue / newTotalQuantity,
+          stop_loss: preservedStopLoss,
+          take_profit: preservedTakeProfit,
           last_updated: trade.timestamp
         };
       } else {
@@ -427,10 +475,16 @@ class ToolsHandler {
 
   async sellCrypto(coin, percentage = 100) {
     try {
-      // Verificar se tem a posição
-      if (!this.portfolio.positions[coin]) {
-        throw new Error(`Não tens posição em ${Formatter.formatCoinName(coin)}`);
-      }
+      // Comprehensive input validation
+      const validated = Validator.validateSellTrade(
+        coin,
+        percentage,
+        this.portfolio.positions
+      );
+
+      // Use validated values
+      coin = validated.coin;
+      percentage = validated.percentage;
 
       const position = this.portfolio.positions[coin];
       const quantityToSell = position.quantity * (percentage / 100);
@@ -502,6 +556,10 @@ class ToolsHandler {
 
   async marketScan(type = "gainers", limit = 5) {
     try {
+      // Validate inputs
+      type = Validator.validateScanType(type);
+      limit = Validator.validateLimit(limit, 5, 20);
+
       const cacheKey = `scan_${type}_${limit}`;
       let cached = this.cache.getMarket(cacheKey);
       

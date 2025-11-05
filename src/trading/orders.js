@@ -1,154 +1,350 @@
-// src/trading/portfolio.js
+// src/trading/orders.js
 const config = require('../utils/config');
 const Formatter = require('../utils/formatter');
 
-class PortfolioManager {
+class OrderManager {
   constructor(dependencies) {
     this.storage = dependencies.storage;
     this.pricesManager = dependencies.pricesManager;
     this.cache = dependencies.cache;
-    this.portfolio = null;
-    this.performanceMetrics = {};
+    this.portfolio = dependencies.portfolio;
+    this.onOrderExecuted = dependencies.onOrderExecuted;
+
+    // Order queues
+    this.pendingOrders = [];
+    this.activeStopLossTakeProfitOrders = [];
+
+    // Monitoring
+    this.monitoringInterval = null;
+    this.monitoringFrequency = 10000; // Check every 10 seconds
   }
 
-  async initialize(portfolioData) {
-    this.portfolio = portfolioData || await this.createInitialPortfolio();
-    await this.calculatePerformanceMetrics();
+  async initialize() {
+    try {
+      // Load pending orders from storage
+      this.pendingOrders = await this.storage.loadPendingOrders() || [];
+
+      // Scan portfolio for stop-loss/take-profit positions
+      await this.scanPortfolioForProtectiveOrders();
+
+      // Start monitoring
+      this.startMonitoring();
+
+      console.error('✅ OrderManager initialized');
+      console.error(`📋 Pending orders: ${this.pendingOrders.length}`);
+      console.error(`🛡️ Stop-Loss/Take-Profit orders: ${this.activeStopLossTakeProfitOrders.length}`);
+    } catch (error) {
+      console.error('❌ Error initializing OrderManager:', error.message);
+      throw error;
+    }
   }
 
-  async updatePortfolioValue() {
-    let totalValue = this.portfolio.balance_usd;
-    const positionValues = {};
+  // Scan portfolio for positions with stop-loss/take-profit
+  async scanPortfolioForProtectiveOrders() {
+    this.activeStopLossTakeProfitOrders = [];
+
+    if (!this.portfolio || !this.portfolio.positions) {
+      return;
+    }
 
     for (const [coin, position] of Object.entries(this.portfolio.positions)) {
+      if (position.stop_loss || position.take_profit) {
+        this.activeStopLossTakeProfitOrders.push({
+          coin,
+          stop_loss: position.stop_loss,
+          take_profit: position.take_profit,
+          quantity: position.quantity,
+          avg_price: position.avg_price
+        });
+      }
+    }
+  }
+
+  // Start background monitoring
+  startMonitoring() {
+    if (this.monitoringInterval) {
+      clearInterval(this.monitoringInterval);
+    }
+
+    this.monitoringInterval = setInterval(async () => {
       try {
-        const currentPrice = await this.pricesManager.getCurrentPrice(coin);
-        const positionValue = position.quantity * currentPrice.price;
-        positionValues[coin] = {
-          ...position,
-          current_price: currentPrice.price,
-          current_value: positionValue,
-          unrealized_pnl: positionValue - (position.quantity * position.avg_price),
-          unrealized_pnl_percent: ((positionValue - (position.quantity * position.avg_price)) / (position.quantity * position.avg_price)) * 100
-        };
-        totalValue += positionValue;
+        await this.checkLimitOrders();
+        await this.checkStopLossTakeProfitOrders();
       } catch (error) {
-        console.error(`⚠️ Erro ao atualizar ${coin}:`, error.message);
+        console.error('⚠️ Error in monitoring loop:', error.message);
+      }
+    }, this.monitoringFrequency);
+
+    console.error('✅ Order monitoring started');
+  }
+
+  // Stop monitoring
+  stopMonitoring() {
+    if (this.monitoringInterval) {
+      clearInterval(this.monitoringInterval);
+      this.monitoringInterval = null;
+      console.error('⏸️ Order monitoring stopped');
+    }
+  }
+
+  // Check and execute limit orders
+  async checkLimitOrders() {
+    if (this.pendingOrders.length === 0) return;
+
+    const ordersToExecute = [];
+    const remainingOrders = [];
+
+    for (const order of this.pendingOrders) {
+      try {
+        const priceData = await this.pricesManager.getCurrentPrice(order.coin);
+        const currentPrice = priceData.price;
+
+        let shouldExecute = false;
+
+        if (order.type === 'BUY_LIMIT' && currentPrice <= order.limit_price) {
+          shouldExecute = true;
+        } else if (order.type === 'SELL_LIMIT' && currentPrice >= order.limit_price) {
+          shouldExecute = true;
+        }
+
+        if (shouldExecute) {
+          ordersToExecute.push({ order, currentPrice });
+        } else {
+          remainingOrders.push(order);
+        }
+      } catch (error) {
+        console.error(`⚠️ Error checking limit order for ${order.coin}:`, error.message);
+        remainingOrders.push(order);
       }
     }
 
-    this.portfolio.total_value = totalValue;
-    this.portfolio.positions_values = positionValues;
-    this.portfolio.allocation = this.calculateAllocation();
-    
-    return this.portfolio;
+    // Execute triggered orders
+    for (const { order, currentPrice } of ordersToExecute) {
+      await this.executeLimitOrder(order, currentPrice);
+    }
+
+    // Update pending orders
+    this.pendingOrders = remainingOrders;
+    await this.storage.savePendingOrders(this.pendingOrders);
   }
 
-  addPosition(coin, quantity, price, metadata = {}) {
-    if (this.portfolio.positions[coin]) {
-      const existing = this.portfolio.positions[coin];
-      const existingValue = existing.quantity * existing.avg_price;
-      const newValue = quantity * price;
-      const totalQuantity = existing.quantity + quantity;
-      
-      this.portfolio.positions[coin] = {
-        ...existing,
-        quantity: totalQuantity,
-        avg_price: (existingValue + newValue) / totalQuantity,
-        last_updated: Formatter.getTimestamp()
-      };
-    } else {
-      this.portfolio.positions[coin] = {
-        quantity,
-        avg_price: price,
-        created_at: Formatter.getTimestamp(),
-        last_updated: Formatter.getTimestamp(),
-        ...metadata
-      };
+  // Check and execute stop-loss/take-profit orders
+  async checkStopLossTakeProfitOrders() {
+    if (this.activeStopLossTakeProfitOrders.length === 0) return;
+
+    const ordersToExecute = [];
+
+    for (const protectiveOrder of this.activeStopLossTakeProfitOrders) {
+      try {
+        // Check if position still exists
+        const position = this.portfolio.positions[protectiveOrder.coin];
+        if (!position) {
+          continue; // Position was closed, skip
+        }
+
+        const priceData = await this.pricesManager.getCurrentPrice(protectiveOrder.coin);
+        const currentPrice = priceData.price;
+
+        let triggerType = null;
+
+        // Check stop-loss
+        if (protectiveOrder.stop_loss && currentPrice <= protectiveOrder.stop_loss) {
+          triggerType = 'STOP_LOSS';
+        }
+        // Check take-profit
+        else if (protectiveOrder.take_profit && currentPrice >= protectiveOrder.take_profit) {
+          triggerType = 'TAKE_PROFIT';
+        }
+
+        if (triggerType) {
+          ordersToExecute.push({
+            coin: protectiveOrder.coin,
+            triggerType,
+            currentPrice,
+            quantity: position.quantity
+          });
+        }
+      } catch (error) {
+        console.error(`⚠️ Error checking protective order for ${protectiveOrder.coin}:`, error.message);
+      }
+    }
+
+    // Execute triggered protective orders
+    for (const order of ordersToExecute) {
+      await this.executeProtectiveOrder(order);
+    }
+
+    // Refresh protective orders after execution
+    if (ordersToExecute.length > 0) {
+      await this.scanPortfolioForProtectiveOrders();
     }
   }
 
-  removePosition(coin, quantity) {
-    if (!this.portfolio.positions[coin]) {
-      throw new Error(`Posição não encontrada: ${coin}`);
+  // Execute a limit order
+  async executeLimitOrder(order, currentPrice) {
+    try {
+      console.error(`🎯 Executing ${order.type} for ${order.coin} at $${currentPrice}`);
+
+      if (order.type === 'BUY_LIMIT') {
+        // Execute buy
+        if (this.onOrderExecuted) {
+          await this.onOrderExecuted({
+            type: 'BUY',
+            coin: order.coin,
+            amount_usd: order.amount_usd,
+            price: currentPrice,
+            order_id: order.id,
+            trigger_type: 'LIMIT_ORDER'
+          });
+        }
+      } else if (order.type === 'SELL_LIMIT') {
+        // Execute sell
+        if (this.onOrderExecuted) {
+          await this.onOrderExecuted({
+            type: 'SELL',
+            coin: order.coin,
+            percentage: order.percentage || 100,
+            price: currentPrice,
+            order_id: order.id,
+            trigger_type: 'LIMIT_ORDER'
+          });
+        }
+      }
+
+      console.error(`✅ Limit order executed: ${order.coin} at $${currentPrice}`);
+    } catch (error) {
+      console.error(`❌ Error executing limit order:`, error.message);
+      // Re-add to pending orders on failure
+      this.pendingOrders.push(order);
     }
+  }
 
-    const position = this.portfolio.positions[coin];
-    if (quantity >= position.quantity) {
-      delete this.portfolio.positions[coin];
-    } else {
-      this.portfolio.positions[coin].quantity -= quantity;
-      this.portfolio.positions[coin].last_updated = Formatter.getTimestamp();
+  // Execute a protective order (stop-loss or take-profit)
+  async executeProtectiveOrder(order) {
+    try {
+      const { coin, triggerType, currentPrice, quantity } = order;
+
+      console.error(`🛡️ ${triggerType} triggered for ${coin} at $${currentPrice}`);
+
+      if (this.onOrderExecuted) {
+        await this.onOrderExecuted({
+          type: 'SELL',
+          coin: coin,
+          percentage: 100, // Sell entire position
+          price: currentPrice,
+          trigger_type: triggerType,
+          reason: triggerType === 'STOP_LOSS' ?
+            'Stop-loss triggered - limiting losses' :
+            'Take-profit triggered - securing gains'
+        });
+      }
+
+      console.error(`✅ ${triggerType} executed: Sold ${coin} at $${currentPrice}`);
+    } catch (error) {
+      console.error(`❌ Error executing protective order:`, error.message);
     }
   }
 
-  calculateAllocation() {
-    const allocation = {
-      cash: {
-        value: this.portfolio.balance_usd,
-        percentage: (this.portfolio.balance_usd / this.portfolio.total_value) * 100
-      },
-      positions: {}
-    };
+  // Add a new limit order
+  async addLimitOrder(type, coin, limitPrice, amountUsd = null, percentage = null) {
+    try {
+      // Validate inputs
+      if (!['BUY_LIMIT', 'SELL_LIMIT'].includes(type)) {
+        throw new Error('Invalid order type. Must be BUY_LIMIT or SELL_LIMIT');
+      }
 
-    Object.entries(this.portfolio.positions_values || {}).forEach(([coin, data]) => {
-      allocation.positions[coin] = {
-        value: data.current_value,
-        percentage: (data.current_value / this.portfolio.total_value) * 100,
-        coin_name: Formatter.formatCoinName(coin)
-      };
-    });
+      if (type === 'BUY_LIMIT' && (!amountUsd || amountUsd <= 0)) {
+        throw new Error('Amount USD is required for BUY_LIMIT orders');
+      }
 
-    return allocation;
-  }
+      if (type === 'SELL_LIMIT' && !this.portfolio.positions[coin]) {
+        throw new Error(`No position in ${coin} to sell`);
+      }
 
-  async calculatePerformanceMetrics() {
-    const initialValue = config.trading.initial_balance;
-    const currentValue = this.portfolio.total_value;
-    const totalReturn = ((currentValue - initialValue) / initialValue) * 100;
-
-    const trades = this.portfolio.trades_history || [];
-    const sellTrades = trades.filter(t => t.type === 'SELL' && t.pnl !== undefined);
-    const winningTrades = sellTrades.filter(t => t.pnl > 0);
-    const winRate = sellTrades.length > 0 ? (winningTrades.length / sellTrades.length) * 100 : 0;
-
-    this.performanceMetrics = {
-      total_return: totalReturn,
-      win_rate: winRate,
-      total_trades: trades.length,
-      winning_trades: winningTrades.length,
-      avg_trade_return: sellTrades.length > 0 ? 
-        sellTrades.reduce((sum, t) => sum + (t.pnl_percent || 0), 0) / sellTrades.length : 0
-    };
-
-    return this.performanceMetrics;
-  }
-
-  getTopPerformers(limit = 3) {
-    if (!this.portfolio.positions_values) return [];
-    
-    return Object.entries(this.portfolio.positions_values)
-      .filter(([_, position]) => position.unrealized_pnl_percent !== undefined)
-      .sort((a, b) => b[1].unrealized_pnl_percent - a[1].unrealized_pnl_percent)
-      .slice(0, limit)
-      .map(([coin, position]) => ({
+      const order = {
+        id: Formatter.generateTradeId(),
+        type,
         coin,
-        coin_name: Formatter.formatCoinName(coin),
-        pnl_percent: position.unrealized_pnl_percent,
-        pnl: position.unrealized_pnl
-      }));
+        limit_price: limitPrice,
+        amount_usd: amountUsd,
+        percentage: percentage || 100,
+        created_at: Formatter.getTimestamp(),
+        status: 'PENDING'
+      };
+
+      this.pendingOrders.push(order);
+      await this.storage.savePendingOrders(this.pendingOrders);
+
+      console.error(`✅ Limit order created: ${type} ${coin} at $${limitPrice}`);
+      return order;
+    } catch (error) {
+      throw new Error(`Error creating limit order: ${error.message}`);
+    }
   }
 
-  async createInitialPortfolio() {
+  // Cancel a limit order
+  async cancelLimitOrder(orderId) {
+    const index = this.pendingOrders.findIndex(o => o.id === orderId);
+
+    if (index === -1) {
+      throw new Error('Order not found');
+    }
+
+    const cancelledOrder = this.pendingOrders.splice(index, 1)[0];
+    await this.storage.savePendingOrders(this.pendingOrders);
+
+    console.error(`❌ Limit order cancelled: ${cancelledOrder.coin}`);
+    return cancelledOrder;
+  }
+
+  // Get all pending orders
+  getPendingOrders() {
+    return this.pendingOrders;
+  }
+
+  // Get all protective orders
+  getProtectiveOrders() {
+    return this.activeStopLossTakeProfitOrders;
+  }
+
+  // Update stop-loss/take-profit for a position
+  async updateProtectiveOrders(coin, stopLoss = null, takeProfit = null) {
+    if (!this.portfolio.positions[coin]) {
+      throw new Error(`No position in ${coin}`);
+    }
+
+    // Update position
+    if (stopLoss !== null) {
+      this.portfolio.positions[coin].stop_loss = stopLoss;
+    }
+    if (takeProfit !== null) {
+      this.portfolio.positions[coin].take_profit = takeProfit;
+    }
+
+    // Rescan protective orders
+    await this.scanPortfolioForProtectiveOrders();
+
+    console.error(`✅ Protective orders updated for ${coin}`);
+    return this.portfolio.positions[coin];
+  }
+
+  // Get order statistics
+  getOrderStats() {
     return {
-      balance_usd: config.trading.initial_balance,
-      positions: {},
-      total_value: config.trading.initial_balance,
-      trades_history: [],
-      pnl: 0,
-      created_at: Formatter.getTimestamp()
+      pending_limit_orders: this.pendingOrders.length,
+      active_stop_loss_orders: this.activeStopLossTakeProfitOrders.filter(o => o.stop_loss).length,
+      active_take_profit_orders: this.activeStopLossTakeProfitOrders.filter(o => o.take_profit).length,
+      monitoring_active: this.monitoringInterval !== null,
+      monitoring_frequency_ms: this.monitoringFrequency
     };
+  }
+
+  // Cleanup on shutdown
+  async shutdown() {
+    this.stopMonitoring();
+    await this.storage.savePendingOrders(this.pendingOrders);
+    console.error('✅ OrderManager shutdown complete');
   }
 }
 
-module.exports = PortfolioManager;
+module.exports = OrderManager;
