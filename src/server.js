@@ -7,6 +7,9 @@ const DataStorage = require('./data/storage');
 const OrderManager = require('./trading/orders');
 const PricesManager = require('./market/prices');
 const WebServer = require('./web-server');
+const ExchangeFactory = require('./exchange/exchange-factory');
+const TelegramNotifier = require('./notifications/telegram-notifier');
+const TradingAgent = require('./ai/trading-agent');
 const config = require('./utils/config');
 
 class CryptoTradingServer {
@@ -22,6 +25,9 @@ class CryptoTradingServer {
     this.orderManager = null;
     this.pricesManager = null;
     this.webServer = null;
+    this.exchange = null;
+    this.notifier = null;
+    this.tradingAgent = null;
 
     // Estado do servidor
     this.portfolio = null;
@@ -66,6 +72,11 @@ class CryptoTradingServer {
       // 7. Setup de shutdown gracioso
       this.setupShutdownHandlers();
 
+      // 8. Start AI Trading Agent if enabled
+      if (this.tradingAgent && this.tradingAgent.enabled) {
+        await this.tradingAgent.start();
+      }
+
       console.error('✅ Servidor iniciado com sucesso!');
       console.error(`💰 Portfolio: $${this.portfolio.total_value.toFixed(2)}`);
       console.error(`📊 Posições: ${Object.keys(this.portfolio.positions).length}`);
@@ -95,12 +106,29 @@ class CryptoTradingServer {
   }
 
   async initializeHandlers() {
-    // Initialize prices manager
+    // Initialize Telegram notifications
+    this.notifier = new TelegramNotifier();
+
+    // Initialize prices manager FIRST (needed by exchange)
     this.pricesManager = new PricesManager({
       cache: this.cache,
       storage: this.storage,
       stats: this.stats
     });
+
+    // Print exchange configuration
+    console.error('\n💱 Exchange Configuration:');
+    ExchangeFactory.printConfig();
+
+    // Initialize exchange (defaults to PAPER mode)
+    this.exchange = ExchangeFactory.create({
+      dependencies: {
+        pricesManager: this.pricesManager,
+        portfolio: this.portfolio
+      }
+    });
+
+    await this.exchange.initialize();
 
     // Initialize order manager
     this.orderManager = new OrderManager({
@@ -119,7 +147,9 @@ class CryptoTradingServer {
       portfolio: this.portfolio,
       cache: this.cache,
       storage: this.storage,
-      stats: this.stats
+      stats: this.stats,
+      exchange: this.exchange,
+      notifier: this.notifier
     });
 
     this.toolsHandler = new ToolsHandler({
@@ -131,6 +161,30 @@ class CryptoTradingServer {
       onPortfolioUpdate: this.handlePortfolioUpdate.bind(this),
       onStatsUpdate: this.handleStatsUpdate.bind(this)
     });
+
+    // Initialize AI Trading Agent
+    const aiStrategy = process.env.AI_STRATEGY || 'BALANCED';
+    const aiEnabled = process.env.AI_TRADING_ENABLED === 'true';
+    const aiCheckInterval = parseInt(process.env.AI_CHECK_INTERVAL_HOURS || '6') * 60 * 60 * 1000;
+
+    this.tradingAgent = new TradingAgent({
+      pricesManager: this.pricesManager,
+      toolsHandler: this.toolsHandler,
+      portfolio: this.portfolio,
+      storage: this.storage,
+      notifier: this.notifier,
+      strategy: aiStrategy,
+      enabled: aiEnabled,
+      checkInterval: aiCheckInterval
+    });
+
+    // Auto-start AI trading if enabled
+    if (aiEnabled) {
+      console.error('\n🤖 AI Trading Agent configuration:');
+      console.error(`   Strategy: ${aiStrategy}`);
+      console.error(`   Check interval: ${aiCheckInterval / (60 * 60 * 1000)}h`);
+      console.error(`   Auto-start: ${aiEnabled}`);
+    }
 
     console.error('✅ Handlers especializados inicializados');
   }
@@ -236,22 +290,81 @@ class CryptoTradingServer {
       console.error(`🤖 Auto-executing order: ${orderData.type} ${orderData.coin}`);
 
       if (orderData.type === 'BUY') {
-        await this.toolsHandler.buyCrypto(
+        const result = await this.toolsHandler.buyCrypto(
           orderData.coin,
           orderData.amount_usd,
           null,
           null
         );
+
+        // Send notification for limit buy order
+        if (this.notifier && orderData.triggerType === 'LIMIT') {
+          await this.notifier.notifyLimitOrderFilled(
+            'BUY',
+            orderData.coin,
+            orderData.quantity,
+            orderData.price,
+            orderData.amount_usd
+          );
+        }
       } else if (orderData.type === 'SELL') {
-        await this.toolsHandler.sellCrypto(
+        const position = this.portfolio.positions[orderData.coin];
+        const result = await this.toolsHandler.sellCrypto(
           orderData.coin,
           orderData.percentage
         );
+
+        // Send appropriate notification based on trigger type
+        if (this.notifier && position) {
+          const soldQty = position.quantity * (orderData.percentage / 100);
+          const soldValue = soldQty * orderData.price;
+
+          if (orderData.triggerType === 'STOP_LOSS') {
+            const loss = soldValue - (soldQty * position.avg_price);
+            await this.notifier.notifyStopLoss(
+              orderData.coin,
+              soldQty,
+              orderData.price,
+              soldValue,
+              Math.abs(loss)
+            );
+          } else if (orderData.triggerType === 'TAKE_PROFIT') {
+            const profit = soldValue - (soldQty * position.avg_price);
+            await this.notifier.notifyTakeProfit(
+              orderData.coin,
+              soldQty,
+              orderData.price,
+              soldValue,
+              profit
+            );
+          } else if (orderData.triggerType === 'LIMIT') {
+            await this.notifier.notifyLimitOrderFilled(
+              'SELL',
+              orderData.coin,
+              soldQty,
+              orderData.price,
+              soldValue
+            );
+          }
+        }
       }
 
       console.error(`✅ Auto-order executed successfully`);
     } catch (error) {
       console.error(`❌ Error executing automatic order:`, error.message);
+
+      // Send error notification
+      if (this.notifier) {
+        await this.notifier.notifyError(
+          'Order Execution Error',
+          error.message,
+          {
+            coin: orderData.coin,
+            type: orderData.type,
+            triggerType: orderData.triggerType
+          }
+        );
+      }
       await this.storage.logError(error, 'automatic_order_execution');
     }
   }
@@ -262,6 +375,8 @@ class CryptoTradingServer {
     const portfolioHealth = this.checkPortfolioHealth();
     const cacheHealth = this.cache.getStats();
     const orderStats = this.orderManager ? this.orderManager.getOrderStats() : null;
+    const exchangeStatus = this.exchange ? this.exchange.getStatus() : null;
+    const notificationStatus = this.notifier ? this.notifier.getConfig() : null;
 
     return {
       ...health,
@@ -272,7 +387,9 @@ class CryptoTradingServer {
         positions: Object.keys(this.portfolio.positions).length,
         total_trades: this.stats.total_trades
       },
-      orders: orderStats
+      orders: orderStats,
+      exchange: exchangeStatus,
+      notifications: notificationStatus
     };
   }
 
@@ -336,6 +453,11 @@ class CryptoTradingServer {
   async shutdown() {
     try {
       console.error('📊 Salvando dados finais...');
+
+      // Shutdown AI trading agent
+      if (this.tradingAgent && this.tradingAgent.isRunning) {
+        this.tradingAgent.stop();
+      }
 
       // Shutdown web server
       if (this.webServer) {

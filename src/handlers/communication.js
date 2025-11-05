@@ -13,37 +13,77 @@ class CommunicationHandler {
     };
   }
 
+  shouldRunInWebOnlyMode() {
+    // Explicitly set to web-only
+    if (process.env.ENABLE_WEB === 'only') {
+      return true;
+    }
+
+    // Detect cloud platforms (Render, Railway, Heroku, Vercel, etc.)
+    const cloudEnvVars = ['RENDER', 'RAILWAY_STATIC_URL', 'DYNO', 'VERCEL'];
+    const isCloudPlatform = cloudEnvVars.some(env => process.env[env]);
+
+    // If on cloud platform and stdin is not available, run in web-only mode
+    if (isCloudPlatform && !process.stdin.isTTY) {
+      return true;
+    }
+
+    return false;
+  }
+
   initialize() {
     console.error('🚀 CryptoTrader MCP Revolutionary iniciado!');
     console.error(`📡 Protocolo: ${config.mcp.protocol_version}`);
 
-    // Only setup stdin if not in web-only mode
-    if (process.env.ENABLE_WEB !== 'only') {
-      this.setupInputStream();
-    } else {
-      console.error('ℹ️ MCP stdin disabled (web-only mode)');
-    }
+    // Detect if we should run in web-only mode
+    const isWebOnly = this.shouldRunInWebOnlyMode();
 
-    this.sendInitializedMessage();
+    if (!isWebOnly) {
+      this.setupInputStream();
+      this.sendInitializedMessage();
+    } else {
+      console.error('ℹ️ MCP protocol disabled (web-only mode auto-detected)');
+    }
   }
 
   setupInputStream() {
+    // Resume stdin to prevent immediate 'end' event
+    process.stdin.resume();
+
     process.stdin.on('data', (chunk) => {
       this.buffer += chunk.toString();
       this.processBuffer();
     });
 
     process.stdin.on('end', () => {
-      console.error('📡 Conexão encerrada');
-      // Only exit if not in web mode
-      if (process.env.ENABLE_WEB !== 'true' && process.env.ENABLE_WEB !== 'only') {
+      console.error('📡 Conexão MCP encerrada (stdin closed)');
+
+      // Check if we should stay alive in web mode
+      const isWebMode = process.env.ENABLE_WEB === 'true' ||
+                        process.env.ENABLE_WEB === 'only' ||
+                        this.shouldRunInWebOnlyMode();
+
+      if (!isWebMode) {
+        console.error('🔌 Encerrando processo (não em modo web)');
         process.exit(0);
+      } else {
+        console.error('ℹ️ Continuando em modo web (stdin ignorado)');
       }
     });
 
     process.stdin.on('error', (error) => {
-      console.error('❌ Erro na entrada:', error.message);
+      console.error('❌ Erro em stdin:', error.message);
       this.stats.errors++;
+
+      // Don't exit on stdin errors in web mode
+      const isWebMode = process.env.ENABLE_WEB === 'true' ||
+                        process.env.ENABLE_WEB === 'only' ||
+                        this.shouldRunInWebOnlyMode();
+
+      if (!isWebMode) {
+        console.error('🔌 Encerrando devido a erro em stdin');
+        process.exit(1);
+      }
     });
   }
 
@@ -232,17 +272,25 @@ class CommunicationHandler {
   // Shutdown gracioso
   shutdown() {
     console.error('📡 A encerrar servidor MCP...');
-    
-    // Enviar notificação de shutdown (se necessário)
-    this.sendNotification('server/shutdown', {
-      reason: 'Graceful shutdown',
-      timestamp: new Date().toISOString()
-    });
 
-    // Dar tempo para mensagem ser enviada
-    setTimeout(() => {
-      process.exit(0);
-    }, 100);
+    const isWebOnly = this.shouldRunInWebOnlyMode();
+
+    // Only send MCP notifications and exit if not in web-only mode
+    if (!isWebOnly) {
+      // Enviar notificação de shutdown (se necessário)
+      this.sendNotification('server/shutdown', {
+        reason: 'Graceful shutdown',
+        timestamp: new Date().toISOString()
+      });
+
+      // Dar tempo para mensagem ser enviada
+      setTimeout(() => {
+        process.exit(0);
+      }, 100);
+    } else {
+      console.error('ℹ️ MCP shutdown skipped (web-only mode)');
+      // Don't exit - let the main server handle shutdown
+    }
   }
 
   // Validação de mensagens
