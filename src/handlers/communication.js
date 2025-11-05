@@ -17,14 +17,13 @@ class CommunicationHandler {
     console.error('🚀 CryptoTrader MCP Revolutionary iniciado!');
     console.error(`📡 Protocolo: ${config.mcp.protocol_version}`);
 
-    // Only setup stdin if not in web-only mode
+    // Only setup stdin and MCP protocol if not in web-only mode
     if (process.env.ENABLE_WEB !== 'only') {
       this.setupInputStream();
+      this.sendInitializedMessage();
     } else {
-      console.error('ℹ️ MCP stdin disabled (web-only mode)');
+      console.error('ℹ️ MCP protocol disabled (web-only mode)');
     }
-
-    this.sendInitializedMessage();
   }
 
   setupInputStream() {
@@ -232,17 +231,22 @@ class CommunicationHandler {
   // Shutdown gracioso
   shutdown() {
     console.error('📡 A encerrar servidor MCP...');
-    
-    // Enviar notificação de shutdown (se necessário)
-    this.sendNotification('server/shutdown', {
-      reason: 'Graceful shutdown',
-      timestamp: new Date().toISOString()
-    });
 
-    // Dar tempo para mensagem ser enviada
-    setTimeout(() => {
-      process.exit(0);
-    }, 100);
+    // Only send MCP notifications and exit if not in web-only mode
+    if (process.env.ENABLE_WEB !== 'only') {
+      // Enviar notificação de shutdown (se necessário)
+      this.sendNotification('server/shutdown', {
+        reason: 'Graceful shutdown',
+        timestamp: new Date().toISOString()
+      });
+
+      // Dar tempo para mensagem ser enviada
+      setTimeout(() => {
+        process.exit(0);
+      }, 100);
+    } else {
+      console.error('ℹ️ MCP shutdown skipped (web-only mode)');
+    }
   }
 
   // Validação de mensagens
