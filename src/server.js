@@ -6,6 +6,7 @@ const CacheManager = require('./utils/cache');
 const DataStorage = require('./data/storage');
 const OrderManager = require('./trading/orders');
 const PricesManager = require('./market/prices');
+const WebServer = require('./web-server');
 const config = require('./utils/config');
 
 class CryptoTradingServer {
@@ -20,6 +21,7 @@ class CryptoTradingServer {
     this.toolsHandler = null;
     this.orderManager = null;
     this.pricesManager = null;
+    this.webServer = null;
 
     // Estado do servidor
     this.portfolio = null;
@@ -55,7 +57,13 @@ class CryptoTradingServer {
       // 5. Inicializar comunicação
       this.communication.initialize();
 
-      // 6. Setup de shutdown gracioso
+      // 6. Inicializar web server (se não estiver em modo MCP puro)
+      if (process.env.ENABLE_WEB !== 'false') {
+        this.webServer = new WebServer(this);
+        await this.webServer.start();
+      }
+
+      // 7. Setup de shutdown gracioso
       this.setupShutdownHandlers();
 
       console.error('✅ Servidor iniciado com sucesso!');
@@ -329,6 +337,11 @@ class CryptoTradingServer {
     try {
       console.error('📊 Salvando dados finais...');
 
+      // Shutdown web server
+      if (this.webServer) {
+        this.webServer.stop();
+      }
+
       // Shutdown order manager first to stop monitoring
       if (this.orderManager) {
         await this.orderManager.shutdown();
@@ -346,6 +359,7 @@ class CryptoTradingServer {
 
       console.error('✅ Shutdown concluído');
       this.communication.shutdown();
+      process.exit(0);
 
     } catch (error) {
       console.error('❌ Erro durante shutdown:', error.message);

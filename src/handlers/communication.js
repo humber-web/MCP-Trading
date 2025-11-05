@@ -16,8 +16,14 @@ class CommunicationHandler {
   initialize() {
     console.error('🚀 CryptoTrader MCP Revolutionary iniciado!');
     console.error(`📡 Protocolo: ${config.mcp.protocol_version}`);
-    
-    this.setupInputStream();
+
+    // Only setup stdin if not in web-only mode
+    if (process.env.ENABLE_WEB !== 'only') {
+      this.setupInputStream();
+    } else {
+      console.error('ℹ️ MCP stdin disabled (web-only mode)');
+    }
+
     this.sendInitializedMessage();
   }
 
@@ -29,7 +35,10 @@ class CommunicationHandler {
 
     process.stdin.on('end', () => {
       console.error('📡 Conexão encerrada');
-      process.exit(0);
+      // Only exit if not in web mode
+      if (process.env.ENABLE_WEB !== 'true' && process.env.ENABLE_WEB !== 'only') {
+        process.exit(0);
+      }
     });
 
     process.stdin.on('error', (error) => {
