@@ -11,12 +11,12 @@
     "docs": "echo 'Documentation in README.md'"
   },
   "keywords": [
-    "mcp", 
-    "crypto", 
-    "trading", 
-    "bitcoin", 
-    "ethereum", 
-    "ai", 
+    "mcp",
+    "crypto",
+    "trading",
+    "bitcoin",
+    "ethereum",
+    "ai",
     "claude",
     "revolutionary",
     "paper-trading",
@@ -30,9 +30,10 @@
   },
   "dependencies": {
     "axios": "^1.6.0",
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
     "node-cache": "^5.1.2"
   },
-  "devDependencies": {},
   "repository": {
     "type": "git",
     "url": "https://github.com/humber/crypto-trader-mcp-revolutionary"

@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: cryptotrader-mcp
+    env: node
+    region: oregon
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: ENABLE_WEB
+        value: true
+      - key: INITIAL_BALANCE
+        value: 10000

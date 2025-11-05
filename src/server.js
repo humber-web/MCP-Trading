@@ -4,6 +4,9 @@ const ResourcesHandler = require('./handlers/resources');
 const ToolsHandler = require('./handlers/tools');
 const CacheManager = require('./utils/cache');
 const DataStorage = require('./data/storage');
+const OrderManager = require('./trading/orders');
+const PricesManager = require('./market/prices');
+const WebServer = require('./web-server');
 const config = require('./utils/config');
 
 class CryptoTradingServer {
@@ -16,7 +19,10 @@ class CryptoTradingServer {
     // Handlers especializados
     this.resourcesHandler = null;
     this.toolsHandler = null;
-    
+    this.orderManager = null;
+    this.pricesManager = null;
+    this.webServer = null;
+
     // Estado do servidor
     this.portfolio = null;
     this.stats = {
@@ -35,30 +41,36 @@ class CryptoTradingServer {
   async initialize() {
     try {
       console.error('🚀 Inicializando CryptoTrader MCP Revolutionary...');
-      
+
       // 1. Inicializar armazenamento
       await this.storage.initialize();
-      
+
       // 2. Carregar portfolio e stats
       await this.loadData();
-      
+
       // 3. Inicializar handlers especializados
-      this.initializeHandlers();
-      
+      await this.initializeHandlers();
+
       // 4. Registar handlers MCP
       this.registerMCPHandlers();
-      
+
       // 5. Inicializar comunicação
       this.communication.initialize();
-      
-      // 6. Setup de shutdown gracioso
+
+      // 6. Inicializar web server (se não estiver em modo MCP puro)
+      if (process.env.ENABLE_WEB !== 'false') {
+        this.webServer = new WebServer(this);
+        await this.webServer.start();
+      }
+
+      // 7. Setup de shutdown gracioso
       this.setupShutdownHandlers();
-      
+
       console.error('✅ Servidor iniciado com sucesso!');
       console.error(`💰 Portfolio: $${this.portfolio.total_value.toFixed(2)}`);
       console.error(`📊 Posições: ${Object.keys(this.portfolio.positions).length}`);
       console.error(`📈 Total trades: ${this.stats.total_trades}`);
-      
+
     } catch (error) {
       console.error('❌ Erro ao inicializar servidor:', error.message);
       await this.storage.logError(error, 'server_initialization');
@@ -82,7 +94,26 @@ class CryptoTradingServer {
     }
   }
 
-  initializeHandlers() {
+  async initializeHandlers() {
+    // Initialize prices manager
+    this.pricesManager = new PricesManager({
+      cache: this.cache,
+      storage: this.storage,
+      stats: this.stats
+    });
+
+    // Initialize order manager
+    this.orderManager = new OrderManager({
+      storage: this.storage,
+      pricesManager: this.pricesManager,
+      cache: this.cache,
+      portfolio: this.portfolio,
+      onOrderExecuted: this.handleOrderExecuted.bind(this)
+    });
+
+    // Initialize OrderManager
+    await this.orderManager.initialize();
+
     // Inicializar handlers com dependências
     this.resourcesHandler = new ResourcesHandler({
       portfolio: this.portfolio,
@@ -96,6 +127,7 @@ class CryptoTradingServer {
       cache: this.cache,
       storage: this.storage,
       stats: this.stats,
+      orderManager: this.orderManager,
       onPortfolioUpdate: this.handlePortfolioUpdate.bind(this),
       onStatsUpdate: this.handleStatsUpdate.bind(this)
     });
@@ -173,9 +205,14 @@ class CryptoTradingServer {
   // Callbacks para updates
   async handlePortfolioUpdate(updatedPortfolio) {
     this.portfolio = updatedPortfolio;
-    
+
     try {
       await this.storage.savePortfolio(this.portfolio);
+
+      // Rescan protective orders after portfolio update
+      if (this.orderManager) {
+        await this.orderManager.scanPortfolioForProtectiveOrders();
+      }
     } catch (error) {
       console.error('❌ Erro ao salvar portfolio:', error.message);
       await this.storage.logError(error, 'portfolio_save');
@@ -184,7 +221,7 @@ class CryptoTradingServer {
 
   async handleStatsUpdate(updatedStats) {
     this.stats = { ...this.stats, ...updatedStats };
-    
+
     try {
       await this.storage.saveStats(this.stats);
     } catch (error) {
@@ -193,11 +230,38 @@ class CryptoTradingServer {
     }
   }
 
+  // Callback for automatic order execution
+  async handleOrderExecuted(orderData) {
+    try {
+      console.error(`🤖 Auto-executing order: ${orderData.type} ${orderData.coin}`);
+
+      if (orderData.type === 'BUY') {
+        await this.toolsHandler.buyCrypto(
+          orderData.coin,
+          orderData.amount_usd,
+          null,
+          null
+        );
+      } else if (orderData.type === 'SELL') {
+        await this.toolsHandler.sellCrypto(
+          orderData.coin,
+          orderData.percentage
+        );
+      }
+
+      console.error(`✅ Auto-order executed successfully`);
+    } catch (error) {
+      console.error(`❌ Error executing automatic order:`, error.message);
+      await this.storage.logError(error, 'automatic_order_execution');
+    }
+  }
+
   // Handlers de sistema
   async handleHealthCheck(params) {
     const health = this.communication.healthCheck();
     const portfolioHealth = this.checkPortfolioHealth();
     const cacheHealth = this.cache.getStats();
+    const orderStats = this.orderManager ? this.orderManager.getOrderStats() : null;
 
     return {
       ...health,
@@ -207,11 +271,14 @@ class CryptoTradingServer {
         total_value: this.portfolio.total_value,
         positions: Object.keys(this.portfolio.positions).length,
         total_trades: this.stats.total_trades
-      }
+      },
+      orders: orderStats
     };
   }
 
   async handleSystemStats(params) {
+    const orderStats = this.orderManager ? this.orderManager.getOrderStats() : null;
+
     return {
       server: this.communication.getStats(),
       cache: this.cache.getStats(),
@@ -223,6 +290,7 @@ class CryptoTradingServer {
         total_pnl: this.portfolio.pnl,
         roi_percent: ((this.portfolio.total_value - config.trading.initial_balance) / config.trading.initial_balance) * 100
       },
+      orders: orderStats,
       storage: await this.storage.getStorageInfo()
     };
   }
@@ -268,7 +336,17 @@ class CryptoTradingServer {
   async shutdown() {
     try {
       console.error('📊 Salvando dados finais...');
-      
+
+      // Shutdown web server
+      if (this.webServer) {
+        this.webServer.stop();
+      }
+
+      // Shutdown order manager first to stop monitoring
+      if (this.orderManager) {
+        await this.orderManager.shutdown();
+      }
+
       // Salvar portfolio e stats uma última vez
       await this.storage.savePortfolio(this.portfolio);
       await this.storage.saveStats({
@@ -281,7 +359,8 @@ class CryptoTradingServer {
 
       console.error('✅ Shutdown concluído');
       this.communication.shutdown();
-      
+      process.exit(0);
+
     } catch (error) {
       console.error('❌ Erro durante shutdown:', error.message);
       process.exit(1);
