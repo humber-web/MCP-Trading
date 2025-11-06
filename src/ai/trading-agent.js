@@ -270,6 +270,15 @@ class TradingAgent {
 
       try {
         const analysis = await this.toolsHandler.analyzeCoin(coin, 7);
+
+        // Validate analysis structure
+        if (!analysis || !analysis.analysis || !analysis.analysis.indicators) {
+          console.error(`   ⚠️  ${coin.toUpperCase()}: Invalid analysis data (missing indicators)`);
+          // Add delay even on error to avoid rate limits
+          await new Promise(resolve => setTimeout(resolve, 5000));
+          continue;
+        }
+
         const opportunity = this.evaluateBuyOpportunity(coin, analysis);
 
         if (opportunity) {
@@ -278,10 +287,19 @@ class TradingAgent {
           console.log(`       Score: ${opportunity.score}/100`);
           console.log(`       Reason: ${opportunity.reason}\n`);
         } else {
-          console.log(`   ❌ ${coin.toUpperCase()}: No opportunity (RSI: ${analysis.analysis.indicators.rsi.toFixed(1)})\n`);
+          const rsi = analysis.analysis.indicators.rsi || 0;
+          console.log(`   ❌ ${coin.toUpperCase()}: No opportunity (RSI: ${rsi.toFixed(1)})\n`);
+        }
+
+        // Add delay between coin analyses to avoid rate limits (5 seconds)
+        if (this.watchlist.indexOf(coin) < this.watchlist.length - 1) {
+          console.log(`   ⏳ Waiting 5 seconds before next coin analysis...\n`);
+          await new Promise(resolve => setTimeout(resolve, 5000));
         }
       } catch (error) {
         console.error(`   ⚠️  Error analyzing ${coin}:`, error.message);
+        // Add delay even on error to avoid rate limits
+        await new Promise(resolve => setTimeout(resolve, 5000));
       }
     }
 
@@ -295,10 +313,21 @@ class TradingAgent {
    * Evaluate if coin is a buy opportunity
    */
   evaluateBuyOpportunity(coin, analysis) {
+    // Safety checks
+    if (!analysis?.analysis?.indicators) {
+      return null;
+    }
+
     const indicators = analysis.analysis.indicators;
-    const price = analysis.current_price.price;
+    const price = analysis.current_price?.price;
     const rsi = indicators.rsi;
     const macdTrend = indicators.macd_histogram > 0 ? 'BULLISH' : 'BEARISH';
+
+    // Validate required indicators
+    if (typeof rsi !== 'number' || !price) {
+      console.error(`   ⚠️  ${coin.toUpperCase()}: Missing required indicators (RSI or price)`);
+      return null;
+    }
 
     let score = 50; // Base score
     const reasons = [];
@@ -323,7 +352,7 @@ class TradingAgent {
     }
 
     // Trend analysis
-    const trend = analysis.analysis.trend_analysis.trend;
+    const trend = analysis.analysis.trend_analysis?.trend;
     if (trend === 'UPTREND') {
       score += 15;
       reasons.push('In uptrend');

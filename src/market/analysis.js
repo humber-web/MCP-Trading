@@ -24,9 +24,9 @@ class MarketAnalysis {
 
     // Retry configuration for analysis API calls
     this.retryConfig = {
-      maxRetries: 4,
-      baseDelay: 2000, // Start with 2 seconds
-      maxDelay: 32000 // Max 32 seconds
+      maxRetries: 5,
+      baseDelay: 5000, // Start with 5 seconds
+      maxDelay: 60000 // Max 60 seconds
     };
   }
 
@@ -89,48 +89,62 @@ class MarketAnalysis {
 
     try {
       console.error(`🔍 Analisando ${coin} (${days} dias)...`);
-      
+
       // Obter dados históricos
       const priceHistory = await this.getPriceHistory(coin, days);
       const currentPrice = await this.pricesManager.getCurrentPrice(coin);
-      
+
+      // Validate data before processing
+      if (!priceHistory || !priceHistory.prices || priceHistory.prices.length === 0) {
+        throw new Error('Dados históricos inválidos ou vazios');
+      }
+
+      if (!currentPrice || !currentPrice.price) {
+        throw new Error('Preço atual inválido');
+      }
+
       // Calcular indicadores técnicos
       const technicalIndicators = this.calculateTechnicalIndicators(priceHistory.prices);
-      
+
+      // Validate indicators
+      if (!technicalIndicators || typeof technicalIndicators.rsi !== 'number') {
+        throw new Error('Indicadores técnicos inválidos');
+      }
+
       // Análise de tendência
       const trendAnalysis = this.analyzeTrend(priceHistory.prices);
-      
+
       // Análise de volume
       const volumeAnalysis = this.analyzeVolume(priceHistory.volumes);
-      
+
       // Análise de volatilidade
       const volatilityAnalysis = this.analyzeVolatility(priceHistory.prices);
-      
+
       // Sinais de trading
       const tradingSignals = this.generateTradingSignals(technicalIndicators, trendAnalysis);
-      
+
       // Níveis de suporte e resistência
       const supportResistance = this.calculateSupportResistance(priceHistory.prices);
-      
+
       // Análise de momentum
       const momentum = this.analyzeMomentum(priceHistory.prices, priceHistory.volumes);
-      
+
       // Score geral
       const overallScore = this.calculateOverallScore(technicalIndicators, trendAnalysis, tradingSignals);
-      
+
       const analysis = {
         coin: coin,
         coin_name: Formatter.formatCoinName(coin),
         period_days: days,
         timestamp: Formatter.getTimestamp(),
-        
+
         current_data: {
           price: currentPrice.price,
           price_formatted: Formatter.formatPrice(currentPrice.price),
           change_24h: currentPrice.change_24h || 0,
           change_formatted: Formatter.formatPriceChange(currentPrice.change_24h || 0)
         },
-        
+
         technical_indicators: technicalIndicators,
         trend_analysis: trendAnalysis,
         volume_analysis: volumeAnalysis,
@@ -138,14 +152,14 @@ class MarketAnalysis {
         support_resistance: supportResistance,
         momentum_analysis: momentum,
         trading_signals: tradingSignals,
-        
+
         overall_assessment: {
           score: overallScore,
           rating: this.scoreToRating(overallScore),
           recommendation: this.generateRecommendation(overallScore, tradingSignals),
           confidence: this.calculateConfidence(technicalIndicators, trendAnalysis)
         },
-        
+
         risk_factors: this.identifyRiskFactors(volatilityAnalysis, technicalIndicators),
         entry_exit_points: this.suggestEntryExitPoints(currentPrice.price, supportResistance, tradingSignals)
       };
@@ -154,6 +168,7 @@ class MarketAnalysis {
       return analysis;
 
     } catch (error) {
+      console.error(`❌ Erro ao analisar ${coin}: ${error.message}`);
       throw new Error(`Erro na análise de ${coin}: ${error.message}`);
     }
   }

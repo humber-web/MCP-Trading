@@ -15,7 +15,7 @@ class PricesManager {
         name: 'CoinGecko',
         baseUrl: config.apis.coingecko.base_url,
         timeout: config.apis.coingecko.timeout,
-        rateLimitPerMinute: 45 // Balanced rate limit (was 50, then 30, now 45)
+        rateLimitPerMinute: 10 // Conservative for CoinGecko free tier (10-30 req/min)
       },
       // Future: Add more price feeds for redundancy
       // secondary: {
@@ -28,14 +28,14 @@ class PricesManager {
     // Rate limiting with sliding window
     this.requestQueue = [];
     this.rateLimitWindow = 60000; // 1 minute
-    this.minRequestInterval = 800; // Minimum 0.8s between requests (75 req/min max)
+    this.minRequestInterval = 4000; // 4 seconds between requests (15 req/min max)
     this.lastRequestTime = 0;
 
     // Retry configuration
     this.retryConfig = {
-      maxRetries: 4,
-      baseDelay: 2000, // Start with 2 seconds
-      maxDelay: 32000 // Max 32 seconds
+      maxRetries: 5,
+      baseDelay: 5000, // Start with 5 seconds
+      maxDelay: 60000 // Max 60 seconds
     };
   }
 
