@@ -1,4 +1,7 @@
 // src/server.js
+// Load environment variables first (before any other imports)
+require('dotenv').config();
+
 const CommunicationHandler = require('./handlers/communication');
 const ResourcesHandler = require('./handlers/resources');
 const ToolsHandler = require('./handlers/tools');
@@ -47,6 +50,23 @@ class CryptoTradingServer {
   async initialize() {
     try {
       console.error('🚀 Inicializando CryptoTrader MCP Revolutionary...');
+
+      // Debug: Show environment variable status
+      console.error('\n🔧 Environment Configuration:');
+      console.error(`   NODE_ENV: ${process.env.NODE_ENV || 'not set'}`);
+      console.error(`   PORT: ${process.env.PORT || 'not set (using default)'}`);
+
+      // CoinGecko API Key status
+      if (process.env.COINGECKO_API_KEY) {
+        const keyPreview = process.env.COINGECKO_API_KEY.substring(0, 6) + '...' +
+                          process.env.COINGECKO_API_KEY.substring(process.env.COINGECKO_API_KEY.length - 4);
+        console.error(`   ✅ COINGECKO_API_KEY: ${keyPreview} (detected)`);
+      } else {
+        console.error(`   ⚠️  COINGECKO_API_KEY: not set (using free tier)`);
+      }
+
+      console.error(`   AI_TRADING_ENABLED: ${process.env.AI_TRADING_ENABLED || 'false'}`);
+      console.error(`   TRADING_MODE: ${process.env.TRADING_MODE || 'PAPER'}\n`);
 
       // 1. Inicializar armazenamento
       await this.storage.initialize();
