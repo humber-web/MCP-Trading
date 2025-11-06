@@ -16,8 +16,8 @@ class PricesManager {
         baseUrl: config.apis.coingecko.base_url,
         timeout: config.apis.coingecko.timeout,
         apiKey: config.apis.coingecko.api_key,
-        // Adjust rate limit based on API key availability
-        rateLimitPerMinute: config.apis.coingecko.api_key ? 30 : 10
+        // Conservative rate limits to avoid 429s: with key = 12/min, without = 7/min
+        rateLimitPerMinute: config.apis.coingecko.api_key ? 12 : 7
       },
       // Future: Add more price feeds for redundancy
       // secondary: {
@@ -30,8 +30,9 @@ class PricesManager {
     // Rate limiting with sliding window
     this.requestQueue = [];
     this.rateLimitWindow = 60000; // 1 minute
-    // Adjust interval based on API key: with key = 2s (30/min), without = 4s (15/min)
-    this.minRequestInterval = config.apis.coingecko.api_key ? 2000 : 4000;
+    // Adjust interval based on API key: with key = 5s (12/min), without = 8s (7.5/min)
+    // More conservative to avoid 429 errors even with API key
+    this.minRequestInterval = config.apis.coingecko.api_key ? 5000 : 8000;
     this.lastRequestTime = 0;
 
     // Retry configuration
@@ -43,9 +44,9 @@ class PricesManager {
 
     // Log API configuration status
     if (config.apis.coingecko.api_key) {
-      console.log('✅ CoinGecko API Key detected - Using 30 requests/minute limit');
+      console.log('✅ CoinGecko API Key detected - Using 12 requests/minute limit (5s intervals)');
     } else {
-      console.log('⚠️  No CoinGecko API Key - Using conservative 10 requests/minute limit');
+      console.log('⚠️  No CoinGecko API Key - Using conservative 7 requests/minute limit (8s intervals)');
     }
   }
 
@@ -59,6 +60,17 @@ class PricesManager {
       // CoinGecko uses x-cg-demo-api-key or x-cg-pro-api-key header
       // We'll use demo format as it works for both demo and pro plans
       headers['x-cg-demo-api-key'] = this.priceFeeds.primary.apiKey;
+
+      // DEBUG: Log that we're including the API key
+      if (!this._headerLoggedOnce) {
+        console.error(`🔑 API Key Header: x-cg-demo-api-key = ${this.priceFeeds.primary.apiKey.substring(0, 6)}...`);
+        this._headerLoggedOnce = true;
+      }
+    } else {
+      if (!this._noKeyLoggedOnce) {
+        console.error(`⚠️  No API key available for request headers`);
+        this._noKeyLoggedOnce = true;
+      }
     }
 
     return headers;

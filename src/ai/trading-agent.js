@@ -156,6 +156,10 @@ class TradingAgent {
       // Step 1: Analyze market sentiment
       analysis.marketConditions = await this.analyzeMarketConditions();
 
+      // Wait 10 seconds before scanning to avoid rate limits
+      console.log('   ⏳ Waiting 10 seconds before scanning opportunities (rate limit protection)...\n');
+      await new Promise(resolve => setTimeout(resolve, 10000));
+
       // Step 2: Scan for opportunities
       analysis.opportunities = await this.scanForOpportunities();
 
@@ -275,7 +279,7 @@ class TradingAgent {
         if (!analysis || !analysis.analysis || !analysis.analysis.indicators) {
           console.error(`   ⚠️  ${coin.toUpperCase()}: Invalid analysis data (missing indicators)`);
           // Add delay even on error to avoid rate limits
-          await new Promise(resolve => setTimeout(resolve, 5000));
+          await new Promise(resolve => setTimeout(resolve, 10000));
           continue;
         }
 
@@ -291,15 +295,15 @@ class TradingAgent {
           console.log(`   ❌ ${coin.toUpperCase()}: No opportunity (RSI: ${rsi.toFixed(1)})\n`);
         }
 
-        // Add delay between coin analyses to avoid rate limits (5 seconds)
+        // Add delay between coin analyses to avoid rate limits (10 seconds)
         if (this.watchlist.indexOf(coin) < this.watchlist.length - 1) {
-          console.log(`   ⏳ Waiting 5 seconds before next coin analysis...\n`);
-          await new Promise(resolve => setTimeout(resolve, 5000));
+          console.log(`   ⏳ Waiting 10 seconds before next coin analysis...\n`);
+          await new Promise(resolve => setTimeout(resolve, 10000));
         }
       } catch (error) {
         console.error(`   ⚠️  Error analyzing ${coin}:`, error.message);
         // Add delay even on error to avoid rate limits
-        await new Promise(resolve => setTimeout(resolve, 5000));
+        await new Promise(resolve => setTimeout(resolve, 10000));
       }
     }
 
