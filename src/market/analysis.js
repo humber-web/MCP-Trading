@@ -30,6 +30,19 @@ class MarketAnalysis {
     };
   }
 
+  /**
+   * Get request headers with API key if available
+   */
+  getRequestHeaders() {
+    const headers = {};
+
+    if (config.apis.coingecko.api_key) {
+      headers['x-cg-demo-api-key'] = config.apis.coingecko.api_key;
+    }
+
+    return headers;
+  }
+
   async executeWithRetry(apiCall, context = '') {
     let lastError;
 
@@ -1197,6 +1210,7 @@ class MarketAnalysis {
             days: days,
             interval: days <= 1 ? 'hourly' : days <= 90 ? 'daily' : 'weekly'
           },
+          headers: this.getRequestHeaders(),
           timeout: config.apis.coingecko.timeout
         });
 
