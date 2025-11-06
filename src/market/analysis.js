@@ -9,8 +9,8 @@ class MarketAnalysis {
     this.storage = dependencies.storage;
     this.pricesManager = dependencies.pricesManager;
     this.sentimentManager = dependencies.sentimentManager;
-    this.stats = dependencies.stats || { api_calls: 0 };
-    
+    this.stats = dependencies.stats || { api_calls: 0, retries: 0 };
+
     // Configuração de análise técnica
     this.technicalConfig = {
       sma_periods: [7, 21, 50],
@@ -21,6 +21,60 @@ class MarketAnalysis {
       bollinger_period: 20,
       bollinger_std: 2
     };
+
+    // Retry configuration for analysis API calls
+    this.retryConfig = {
+      maxRetries: 4,
+      baseDelay: 2000, // Start with 2 seconds
+      maxDelay: 32000 // Max 32 seconds
+    };
+  }
+
+  async executeWithRetry(apiCall, context = '') {
+    let lastError;
+
+    for (let attempt = 0; attempt <= this.retryConfig.maxRetries; attempt++) {
+      try {
+        return await apiCall();
+      } catch (error) {
+        lastError = error;
+
+        // Check if it's a rate limit error (429)
+        const isRateLimitError = error.response?.status === 429 ||
+                                 error.message?.includes('429') ||
+                                 error.message?.includes('Too Many Requests');
+
+        // Check if it's a network error that should be retried
+        const isNetworkError = error.code === 'ECONNRESET' ||
+                              error.code === 'ETIMEDOUT' ||
+                              error.code === 'ENOTFOUND';
+
+        const shouldRetry = (isRateLimitError || isNetworkError) && attempt < this.retryConfig.maxRetries;
+
+        if (!shouldRetry) {
+          // Don't retry for other errors or if we've exhausted retries
+          throw error;
+        }
+
+        // Calculate exponential backoff delay
+        const baseDelay = isRateLimitError ?
+          this.retryConfig.baseDelay * 2 : // Longer delays for rate limits
+          this.retryConfig.baseDelay;
+
+        const exponentialDelay = baseDelay * Math.pow(2, attempt);
+        const jitter = Math.random() * 1000; // Add up to 1s random jitter
+        const delay = Math.min(exponentialDelay + jitter, this.retryConfig.maxDelay);
+
+        const errorType = isRateLimitError ? '429 Rate Limit' : 'Network Error';
+        console.error(`⚠️  ${errorType} ${context ? `(${context})` : ''}: Tentativa ${attempt + 1}/${this.retryConfig.maxRetries}, aguardando ${Math.ceil(delay / 1000)}s...`);
+
+        this.stats.retries++;
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+
+    // If we get here, all retries failed
+    throw lastError;
   }
 
   // ANÁLISE COMPLETA DE UMA CRYPTO
@@ -1116,22 +1170,29 @@ class MarketAnalysis {
 
   async getPriceHistory(coin, days) {
     try {
-      const response = await axios.get(`${config.apis.coingecko.base_url}/coins/${coin}/market_chart`, {
-        params: {
-          vs_currency: 'usd',
-          days: days,
-          interval: days <= 1 ? 'hourly' : days <= 90 ? 'daily' : 'weekly'
-        },
-        timeout: config.apis.coingecko.timeout
-      });
+      return await this.executeWithRetry(async () => {
+        // Use rate-limited call if pricesManager has checkRateLimit
+        if (this.pricesManager && this.pricesManager.checkRateLimit) {
+          await this.pricesManager.checkRateLimit();
+        }
 
-      this.stats.api_calls++;
+        const response = await axios.get(`${config.apis.coingecko.base_url}/coins/${coin}/market_chart`, {
+          params: {
+            vs_currency: 'usd',
+            days: days,
+            interval: days <= 1 ? 'hourly' : days <= 90 ? 'daily' : 'weekly'
+          },
+          timeout: config.apis.coingecko.timeout
+        });
 
-      return {
-        prices: response.data.prices.map(p => p[1]),
-        volumes: response.data.total_volumes.map(v => v[1]),
-        market_caps: response.data.market_caps?.map(m => m[1]) || []
-      };
+        this.stats.api_calls++;
+
+        return {
+          prices: response.data.prices.map(p => p[1]),
+          volumes: response.data.total_volumes.map(v => v[1]),
+          market_caps: response.data.market_caps?.map(m => m[1]) || []
+        };
+      }, `histórico de ${coin} (${days} dias)`);
 
     } catch (error) {
       throw new Error(`Erro ao obter dados históricos de ${coin}: ${error.message}`);
