@@ -38,8 +38,9 @@ module.exports = {
   // APIs externas
   apis: {
     coingecko: {
-      base_url: 'https://api.coingecko.com/api/v3',
-      timeout: 10000
+      base_url: process.env.COINGECKO_BASE_URL || 'https://api.coingecko.com/api/v3',
+      timeout: parseInt(process.env.COINGECKO_TIMEOUT) || 10000,
+      api_key: process.env.COINGECKO_API_KEY || null
     },
     fear_greed: {
       base_url: 'https://api.alternative.me/fng/',

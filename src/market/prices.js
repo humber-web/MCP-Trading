@@ -15,7 +15,9 @@ class PricesManager {
         name: 'CoinGecko',
         baseUrl: config.apis.coingecko.base_url,
         timeout: config.apis.coingecko.timeout,
-        rateLimitPerMinute: 10 // Conservative for CoinGecko free tier (10-30 req/min)
+        apiKey: config.apis.coingecko.api_key,
+        // Adjust rate limit based on API key availability
+        rateLimitPerMinute: config.apis.coingecko.api_key ? 30 : 10
       },
       // Future: Add more price feeds for redundancy
       // secondary: {
@@ -28,7 +30,8 @@ class PricesManager {
     // Rate limiting with sliding window
     this.requestQueue = [];
     this.rateLimitWindow = 60000; // 1 minute
-    this.minRequestInterval = 4000; // 4 seconds between requests (15 req/min max)
+    // Adjust interval based on API key: with key = 2s (30/min), without = 4s (15/min)
+    this.minRequestInterval = config.apis.coingecko.api_key ? 2000 : 4000;
     this.lastRequestTime = 0;
 
     // Retry configuration
@@ -37,6 +40,28 @@ class PricesManager {
       baseDelay: 5000, // Start with 5 seconds
       maxDelay: 60000 // Max 60 seconds
     };
+
+    // Log API configuration status
+    if (config.apis.coingecko.api_key) {
+      console.log('✅ CoinGecko API Key detected - Using 30 requests/minute limit');
+    } else {
+      console.log('⚠️  No CoinGecko API Key - Using conservative 10 requests/minute limit');
+    }
+  }
+
+  /**
+   * Get request headers with API key if available
+   */
+  getRequestHeaders() {
+    const headers = {};
+
+    if (this.priceFeeds.primary.apiKey) {
+      // CoinGecko uses x-cg-demo-api-key or x-cg-pro-api-key header
+      // We'll use demo format as it works for both demo and pro plans
+      headers['x-cg-demo-api-key'] = this.priceFeeds.primary.apiKey;
+    }
+
+    return headers;
   }
 
   // SINGLE PRICE OPERATIONS
@@ -75,6 +100,7 @@ class PricesManager {
             days: days,
             interval: interval === 'hourly' && days <= 1 ? 'hourly' : 'daily'
           },
+          headers: this.getRequestHeaders(),
           timeout: this.priceFeeds.primary.timeout
         });
 
@@ -135,6 +161,7 @@ class PricesManager {
             include_market_cap: true,
             include_last_updated_at: true
           },
+          headers: this.getRequestHeaders(),
           timeout: this.priceFeeds.primary.timeout
         });
 
@@ -305,6 +332,7 @@ class PricesManager {
             include_24hr_change: true,
             include_last_updated_at: true
           },
+          headers: this.getRequestHeaders(),
           timeout: this.priceFeeds.primary.timeout
         });
 
