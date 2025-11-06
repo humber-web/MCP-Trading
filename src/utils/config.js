@@ -11,7 +11,7 @@ module.exports = {
   // Cryptos suportadas
   supported_coins: [
     'bitcoin', 'ethereum', 'cardano', 'polkadot', 'chainlink',
-    'solana', 'polygon', 'avalanche-2', 'uniswap', 'aave'
+    'solana', 'matic-network', 'avalanche-2', 'uniswap', 'aave'
   ],
 
   // Mapeamento de nomes
@@ -22,7 +22,7 @@ module.exports = {
     'polkadot': 'Polkadot (DOT)',
     'chainlink': 'Chainlink (LINK)',
     'solana': 'Solana (SOL)',
-    'polygon': 'Polygon (MATIC)',
+    'matic-network': 'Polygon (MATIC)',
     'avalanche-2': 'Avalanche (AVAX)',
     'uniswap': 'Uniswap (UNI)',
     'aave': 'Aave (AAVE)'
