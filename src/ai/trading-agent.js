@@ -79,7 +79,7 @@ class TradingAgent {
       'ethereum',
       'solana',
       'cardano',
-      'polygon',
+      'matic-network', // Polygon (was 'polygon', but correct ID is 'matic-network')
       'avalanche-2'
     ];
   }
