@@ -7,15 +7,15 @@ class PricesManager {
   constructor(dependencies) {
     this.cache = dependencies.cache;
     this.storage = dependencies.storage;
-    this.stats = dependencies.stats || { api_calls: 0 };
-    
+    this.stats = dependencies.stats || { api_calls: 0, rate_limit_hits: 0, retries: 0 };
+
     // Price feed configuration
     this.priceFeeds = {
       primary: {
         name: 'CoinGecko',
         baseUrl: config.apis.coingecko.base_url,
         timeout: config.apis.coingecko.timeout,
-        rateLimitPerMinute: 50
+        rateLimitPerMinute: 30 // Reduced from 50 to be more conservative
       },
       // Future: Add more price feeds for redundancy
       // secondary: {
@@ -25,10 +25,18 @@ class PricesManager {
       // }
     };
 
-    // Rate limiting
-    this.lastApiCall = 0;
-    this.apiCallsThisMinute = 0;
+    // Rate limiting with sliding window
+    this.requestQueue = [];
     this.rateLimitWindow = 60000; // 1 minute
+    this.minRequestInterval = 1200; // Minimum 1.2s between requests (50 req/min max)
+    this.lastRequestTime = 0;
+
+    // Retry configuration
+    this.retryConfig = {
+      maxRetries: 4,
+      baseDelay: 2000, // Start with 2 seconds
+      maxDelay: 32000 // Max 32 seconds
+    };
   }
 
   // SINGLE PRICE OPERATIONS
@@ -52,47 +60,49 @@ class PricesManager {
   async getPriceHistory(coin, days = 7, interval = 'daily') {
     const cacheKey = `price_history_${coin}_${days}_${interval}`;
     let cached = this.cache.getAnalysis(cacheKey);
-    
+
     if (cached) {
       return cached;
     }
 
     try {
-      await this.checkRateLimit();
+      const priceHistory = await this.executeWithRetry(async () => {
+        await this.checkRateLimit();
 
-      const response = await axios.get(`${this.priceFeeds.primary.baseUrl}/coins/${coin}/market_chart`, {
-        params: {
-          vs_currency: 'usd',
+        const response = await axios.get(`${this.priceFeeds.primary.baseUrl}/coins/${coin}/market_chart`, {
+          params: {
+            vs_currency: 'usd',
+            days: days,
+            interval: interval === 'hourly' && days <= 1 ? 'hourly' : 'daily'
+          },
+          timeout: this.priceFeeds.primary.timeout
+        });
+
+        this.stats.api_calls++;
+
+        return {
+          coin: coin,
           days: days,
-          interval: interval === 'hourly' && days <= 1 ? 'hourly' : 'daily'
-        },
-        timeout: this.priceFeeds.primary.timeout
-      });
-
-      this.stats.api_calls++;
-
-      const priceHistory = {
-        coin: coin,
-        days: days,
-        interval: interval,
-        prices: response.data.prices.map(([timestamp, price]) => ({
-          timestamp: new Date(timestamp).toISOString(),
-          price: price,
-          formatted_price: Formatter.formatPrice(price),
-          formatted_time: Formatter.formatDateTime(timestamp)
-        })),
-        volumes: response.data.total_volumes.map(([timestamp, volume]) => ({
-          timestamp: new Date(timestamp).toISOString(),
-          volume: volume,
-          formatted_volume: Formatter.formatNumber(volume)
-        })),
-        market_caps: response.data.market_caps?.map(([timestamp, cap]) => ({
-          timestamp: new Date(timestamp).toISOString(),
-          market_cap: cap,
-          formatted_cap: Formatter.formatNumber(cap)
-        })) || [],
-        fetched_at: Formatter.getTimestamp()
-      };
+          interval: interval,
+          prices: response.data.prices.map(([timestamp, price]) => ({
+            timestamp: new Date(timestamp).toISOString(),
+            price: price,
+            formatted_price: Formatter.formatPrice(price),
+            formatted_time: Formatter.formatDateTime(timestamp)
+          })),
+          volumes: response.data.total_volumes.map(([timestamp, volume]) => ({
+            timestamp: new Date(timestamp).toISOString(),
+            volume: volume,
+            formatted_volume: Formatter.formatNumber(volume)
+          })),
+          market_caps: response.data.market_caps?.map(([timestamp, cap]) => ({
+            timestamp: new Date(timestamp).toISOString(),
+            market_cap: cap,
+            formatted_cap: Formatter.formatNumber(cap)
+          })) || [],
+          fetched_at: Formatter.getTimestamp()
+        };
+      }, `histórico de ${coin}`);
 
       this.cache.setAnalysis(cacheKey, priceHistory);
       return priceHistory;
@@ -107,51 +117,53 @@ class PricesManager {
   async getMultiplePrices(coins) {
     const cacheKey = `multi_prices_${coins.sort().join('_')}`;
     let cached = this.cache.getPrice(cacheKey);
-    
+
     if (cached) {
       return cached;
     }
 
     try {
-      await this.checkRateLimit();
+      const result = await this.executeWithRetry(async () => {
+        await this.checkRateLimit();
 
-      const response = await axios.get(`${this.priceFeeds.primary.baseUrl}/simple/price`, {
-        params: {
-          ids: coins.join(','),
-          vs_currencies: 'usd',
-          include_24hr_change: true,
-          include_24hr_vol: true,
-          include_market_cap: true,
-          include_last_updated_at: true
-        },
-        timeout: this.priceFeeds.primary.timeout
-      });
+        const response = await axios.get(`${this.priceFeeds.primary.baseUrl}/simple/price`, {
+          params: {
+            ids: coins.join(','),
+            vs_currencies: 'usd',
+            include_24hr_change: true,
+            include_24hr_vol: true,
+            include_market_cap: true,
+            include_last_updated_at: true
+          },
+          timeout: this.priceFeeds.primary.timeout
+        });
 
-      this.stats.api_calls++;
+        this.stats.api_calls++;
 
-      const pricesData = Object.entries(response.data).reduce((acc, [coinId, data]) => {
-        acc[coinId] = {
-          price: data.usd,
-          change_24h: data.usd_24h_change || 0,
-          volume_24h: data.usd_24h_vol || 0,
-          market_cap: data.usd_market_cap || 0,
-          last_updated: data.last_updated_at ? new Date(data.last_updated_at * 1000).toISOString() : null,
-          formatted: {
-            price: Formatter.formatPrice(data.usd),
-            change_24h: Formatter.formatPriceChange(data.usd_24h_change || 0),
-            volume_24h: Formatter.formatNumber(data.usd_24h_vol || 0),
-            market_cap: Formatter.formatNumber(data.usd_market_cap || 0)
-          }
+        const pricesData = Object.entries(response.data).reduce((acc, [coinId, data]) => {
+          acc[coinId] = {
+            price: data.usd,
+            change_24h: data.usd_24h_change || 0,
+            volume_24h: data.usd_24h_vol || 0,
+            market_cap: data.usd_market_cap || 0,
+            last_updated: data.last_updated_at ? new Date(data.last_updated_at * 1000).toISOString() : null,
+            formatted: {
+              price: Formatter.formatPrice(data.usd),
+              change_24h: Formatter.formatPriceChange(data.usd_24h_change || 0),
+              volume_24h: Formatter.formatNumber(data.usd_24h_vol || 0),
+              market_cap: Formatter.formatNumber(data.usd_market_cap || 0)
+            }
+          };
+          return acc;
+        }, {});
+
+        return {
+          prices: pricesData,
+          fetched_at: Formatter.getTimestamp(),
+          source: 'api',
+          coins_count: coins.length
         };
-        return acc;
-      }, {});
-
-      const result = {
-        prices: pricesData,
-        fetched_at: Formatter.getTimestamp(),
-        source: 'api',
-        coins_count: coins.length
-      };
+      }, `preços de ${coins.length} moedas`);
 
       this.cache.setPrice(cacheKey, result);
       return result;
@@ -283,29 +295,31 @@ class PricesManager {
 
   async fetchPriceFromAPI(coin) {
     try {
-      await this.checkRateLimit();
+      const priceData = await this.executeWithRetry(async () => {
+        await this.checkRateLimit();
 
-      const response = await axios.get(`${this.priceFeeds.primary.baseUrl}/simple/price`, {
-        params: {
-          ids: coin,
-          vs_currencies: 'usd',
-          include_24hr_change: true,
-          include_last_updated_at: true
-        },
-        timeout: this.priceFeeds.primary.timeout
-      });
+        const response = await axios.get(`${this.priceFeeds.primary.baseUrl}/simple/price`, {
+          params: {
+            ids: coin,
+            vs_currencies: 'usd',
+            include_24hr_change: true,
+            include_last_updated_at: true
+          },
+          timeout: this.priceFeeds.primary.timeout
+        });
 
-      this.stats.api_calls++;
+        this.stats.api_calls++;
 
-      const data = response.data[coin];
-      const priceData = {
-        price: data.usd,
-        change_24h: data.usd_24h_change || 0,
-        timestamp: data.last_updated_at ? 
-          new Date(data.last_updated_at * 1000).toISOString() : 
-          Formatter.getTimestamp(),
-        source: 'api'
-      };
+        const data = response.data[coin];
+        return {
+          price: data.usd,
+          change_24h: data.usd_24h_change || 0,
+          timestamp: data.last_updated_at ?
+            new Date(data.last_updated_at * 1000).toISOString() :
+            Formatter.getTimestamp(),
+          source: 'api'
+        };
+      }, `preço de ${coin}`);
 
       // Cache the result
       const cacheKey = this.cache.constructor.keys.price(coin);
@@ -320,22 +334,90 @@ class PricesManager {
 
   async checkRateLimit() {
     const now = Date.now();
-    
-    // Reset counter if window passed
-    if (now - this.lastApiCall > this.rateLimitWindow) {
-      this.apiCallsThisMinute = 0;
-    }
 
-    // Check if we're at the limit
-    if (this.apiCallsThisMinute >= this.priceFeeds.primary.rateLimitPerMinute) {
-      const waitTime = this.rateLimitWindow - (now - this.lastApiCall);
-      console.error(`⏰ Rate limit atingido, aguardando ${Math.ceil(waitTime / 1000)}s`);
+    // Remove requests older than the rate limit window (sliding window)
+    this.requestQueue = this.requestQueue.filter(
+      timestamp => now - timestamp < this.rateLimitWindow
+    );
+
+    // Enforce minimum interval between requests
+    const timeSinceLastRequest = now - this.lastRequestTime;
+    if (timeSinceLastRequest < this.minRequestInterval) {
+      const waitTime = this.minRequestInterval - timeSinceLastRequest;
       await new Promise(resolve => setTimeout(resolve, waitTime));
-      this.apiCallsThisMinute = 0;
     }
 
-    this.apiCallsThisMinute++;
-    this.lastApiCall = now;
+    // Check if we're at the rate limit
+    if (this.requestQueue.length >= this.priceFeeds.primary.rateLimitPerMinute) {
+      const oldestRequest = this.requestQueue[0];
+      const waitTime = this.rateLimitWindow - (now - oldestRequest) + 100; // Add 100ms buffer
+
+      if (waitTime > 0) {
+        console.error(`⏰ Rate limit atingido (${this.requestQueue.length}/${this.priceFeeds.primary.rateLimitPerMinute}), aguardando ${Math.ceil(waitTime / 1000)}s`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+        // Clean up old requests after waiting
+        const afterWait = Date.now();
+        this.requestQueue = this.requestQueue.filter(
+          timestamp => afterWait - timestamp < this.rateLimitWindow
+        );
+      }
+    }
+
+    // Record this request
+    const requestTime = Date.now();
+    this.requestQueue.push(requestTime);
+    this.lastRequestTime = requestTime;
+  }
+
+  async executeWithRetry(apiCall, context = '') {
+    let lastError;
+
+    for (let attempt = 0; attempt <= this.retryConfig.maxRetries; attempt++) {
+      try {
+        return await apiCall();
+      } catch (error) {
+        lastError = error;
+
+        // Check if it's a rate limit error (429)
+        const isRateLimitError = error.response?.status === 429 ||
+                                 error.message?.includes('429') ||
+                                 error.message?.includes('Too Many Requests');
+
+        // Check if it's a network error that should be retried
+        const isNetworkError = error.code === 'ECONNRESET' ||
+                              error.code === 'ETIMEDOUT' ||
+                              error.code === 'ENOTFOUND';
+
+        const shouldRetry = (isRateLimitError || isNetworkError) && attempt < this.retryConfig.maxRetries;
+
+        if (!shouldRetry) {
+          // Don't retry for other errors or if we've exhausted retries
+          throw error;
+        }
+
+        // Calculate exponential backoff delay
+        const baseDelay = isRateLimitError ?
+          this.retryConfig.baseDelay * 2 : // Longer delays for rate limits
+          this.retryConfig.baseDelay;
+
+        const exponentialDelay = baseDelay * Math.pow(2, attempt);
+        const jitter = Math.random() * 1000; // Add up to 1s random jitter
+        const delay = Math.min(exponentialDelay + jitter, this.retryConfig.maxDelay);
+
+        const errorType = isRateLimitError ? '429 Rate Limit' : 'Network Error';
+        console.error(`⚠️  ${errorType} ${context ? `(${context})` : ''}: Tentativa ${attempt + 1}/${this.retryConfig.maxRetries}, aguardando ${Math.ceil(delay / 1000)}s...`);
+
+        this.stats.retries++;
+        if (isRateLimitError) {
+          this.stats.rate_limit_hits++;
+        }
+
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+
+    // If we get here, all retries failed
+    throw lastError;
   }
 
   // STATISTICS & HEALTH
@@ -343,10 +425,14 @@ class PricesManager {
   getPriceStats() {
     return {
       api_calls: this.stats.api_calls,
+      rate_limit_hits: this.stats.rate_limit_hits,
+      retries: this.stats.retries,
       rate_limit_info: {
-        calls_this_minute: this.apiCallsThisMinute,
+        requests_in_window: this.requestQueue.length,
         limit_per_minute: this.priceFeeds.primary.rateLimitPerMinute,
-        last_call: this.lastApiCall ? new Date(this.lastApiCall).toISOString() : null
+        window_size_ms: this.rateLimitWindow,
+        min_interval_ms: this.minRequestInterval,
+        last_request: this.lastRequestTime ? new Date(this.lastRequestTime).toISOString() : null
       },
       cache_stats: this.cache.getStats(),
       supported_coins: config.supported_coins.length,
@@ -362,12 +448,22 @@ class PricesManager {
       await this.getCurrentPrice(testCoin);
       const responseTime = Date.now() - startTime;
 
+      const utilizationPercent = (this.requestQueue.length / this.priceFeeds.primary.rateLimitPerMinute) * 100;
+      let rateLimitStatus = 'ok';
+      if (utilizationPercent >= 90) rateLimitStatus = 'critical';
+      else if (utilizationPercent >= 70) rateLimitStatus = 'warning';
+
       return {
         status: 'healthy',
         api_connectivity: 'ok',
         response_time_ms: responseTime,
         primary_feed: this.priceFeeds.primary.name,
-        rate_limit_status: this.apiCallsThisMinute < this.priceFeeds.primary.rateLimitPerMinute * 0.8 ? 'ok' : 'warning',
+        rate_limit_status: rateLimitStatus,
+        rate_limit_utilization: `${Math.round(utilizationPercent)}%`,
+        retry_stats: {
+          total_retries: this.stats.retries,
+          rate_limit_hits: this.stats.rate_limit_hits
+        },
         last_check: Formatter.getTimestamp()
       };
 

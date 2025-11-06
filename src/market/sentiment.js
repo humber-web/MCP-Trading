@@ -7,8 +7,8 @@ class MarketSentiment {
   constructor(dependencies) {
     this.cache = dependencies.cache;
     this.storage = dependencies.storage;
-    this.stats = dependencies.stats || { api_calls: 0 };
-    
+    this.stats = dependencies.stats || { api_calls: 0, retries: 0 };
+
     // Sentiment data sources
     this.sources = {
       fear_greed: {
@@ -21,6 +21,56 @@ class MarketSentiment {
       // social_sentiment: { ... },
       // news_sentiment: { ... }
     };
+
+    // Retry configuration for sentiment APIs
+    this.retryConfig = {
+      maxRetries: 3,
+      baseDelay: 1000, // Start with 1 second
+      maxDelay: 8000 // Max 8 seconds
+    };
+  }
+
+  async executeWithRetry(apiCall, context = '') {
+    let lastError;
+
+    for (let attempt = 0; attempt <= this.retryConfig.maxRetries; attempt++) {
+      try {
+        return await apiCall();
+      } catch (error) {
+        lastError = error;
+
+        // Check if it's a rate limit error (429)
+        const isRateLimitError = error.response?.status === 429 ||
+                                 error.message?.includes('429') ||
+                                 error.message?.includes('Too Many Requests');
+
+        // Check if it's a network error that should be retried
+        const isNetworkError = error.code === 'ECONNRESET' ||
+                              error.code === 'ETIMEDOUT' ||
+                              error.code === 'ENOTFOUND';
+
+        const shouldRetry = (isRateLimitError || isNetworkError) && attempt < this.retryConfig.maxRetries;
+
+        if (!shouldRetry) {
+          // Don't retry for other errors or if we've exhausted retries
+          throw error;
+        }
+
+        // Calculate exponential backoff delay
+        const exponentialDelay = this.retryConfig.baseDelay * Math.pow(2, attempt);
+        const jitter = Math.random() * 500; // Add up to 500ms random jitter
+        const delay = Math.min(exponentialDelay + jitter, this.retryConfig.maxDelay);
+
+        const errorType = isRateLimitError ? 'Rate Limit' : 'Network Error';
+        console.error(`⚠️  ${errorType} ${context ? `(${context})` : ''}: Tentativa ${attempt + 1}/${this.retryConfig.maxRetries}, aguardando ${Math.ceil(delay / 1000)}s...`);
+
+        this.stats.retries++;
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+
+    // If we get here, all retries failed
+    throw lastError;
   }
 
   // MAIN SENTIMENT ANALYSIS
@@ -70,43 +120,45 @@ class MarketSentiment {
   async getFearGreedIndex() {
     const cacheKey = 'fear_greed_index';
     let cached = this.cache.getMarket(cacheKey);
-    
+
     if (cached) {
       return cached;
     }
 
     try {
-      const response = await axios.get(this.sources.fear_greed.url, {
-        timeout: this.sources.fear_greed.timeout
-      });
-      
-      this.stats.api_calls++;
-      
-      const data = response.data.data[0];
-      const value = parseInt(data.value);
-      
-      const fearGreedData = {
-        value: value,
-        classification: this.classifySentiment(value),
-        timestamp: data.timestamp,
-        time_until_update: data.time_until_update || null,
-        metadata: {
-          source: 'Alternative.me',
-          scale: '0-100 (0=Extreme Fear, 100=Extreme Greed)',
-          last_updated: Formatter.formatDateTime(data.timestamp * 1000)
-        },
-        interpretation: this.interpretFearGreed(value),
-        emoji: this.getSentimentEmoji(value),
-        color: this.getSentimentColor(value)
-      };
+      const fearGreedData = await this.executeWithRetry(async () => {
+        const response = await axios.get(this.sources.fear_greed.url, {
+          timeout: this.sources.fear_greed.timeout
+        });
+
+        this.stats.api_calls++;
+
+        const data = response.data.data[0];
+        const value = parseInt(data.value);
+
+        return {
+          value: value,
+          classification: this.classifySentiment(value),
+          timestamp: data.timestamp,
+          time_until_update: data.time_until_update || null,
+          metadata: {
+            source: 'Alternative.me',
+            scale: '0-100 (0=Extreme Fear, 100=Extreme Greed)',
+            last_updated: Formatter.formatDateTime(data.timestamp * 1000)
+          },
+          interpretation: this.interpretFearGreed(value),
+          emoji: this.getSentimentEmoji(value),
+          color: this.getSentimentColor(value)
+        };
+      }, 'Fear & Greed Index');
 
       this.cache.setMarket(cacheKey, fearGreedData);
       return fearGreedData;
 
     } catch (error) {
-      // Return fallback data if API fails
-      console.error('⚠️ Fear & Greed API indisponível, usando dados padrão');
-      
+      // Return fallback data if API fails after retries
+      console.error('⚠️ Fear & Greed API indisponível após tentativas, usando dados padrão');
+
       return {
         value: 50,
         classification: 'Neutral',
@@ -122,30 +174,32 @@ class MarketSentiment {
 
   async getHistoricalFearGreed(days = 30) {
     try {
-      const response = await axios.get(`${this.sources.fear_greed.url}?limit=${days}`, {
-        timeout: this.sources.fear_greed.timeout
-      });
-      
-      this.stats.api_calls++;
-      
-      const historicalData = response.data.data.map(item => ({
-        value: parseInt(item.value),
-        classification: this.classifySentiment(parseInt(item.value)),
-        timestamp: item.timestamp,
-        date: Formatter.formatDateTime(item.timestamp * 1000)
-      }));
+      return await this.executeWithRetry(async () => {
+        const response = await axios.get(`${this.sources.fear_greed.url}?limit=${days}`, {
+          timeout: this.sources.fear_greed.timeout
+        });
 
-      return {
-        historical_data: historicalData,
-        period_days: days,
-        average_sentiment: historicalData.reduce((sum, item) => sum + item.value, 0) / historicalData.length,
-        volatility: this.calculateSentimentVolatility(historicalData.map(item => item.value)),
-        trend: this.calculateSentimentTrend(historicalData),
-        extremes: {
-          highest: Math.max(...historicalData.map(item => item.value)),
-          lowest: Math.min(...historicalData.map(item => item.value))
-        }
-      };
+        this.stats.api_calls++;
+
+        const historicalData = response.data.data.map(item => ({
+          value: parseInt(item.value),
+          classification: this.classifySentiment(parseInt(item.value)),
+          timestamp: item.timestamp,
+          date: Formatter.formatDateTime(item.timestamp * 1000)
+        }));
+
+        return {
+          historical_data: historicalData,
+          period_days: days,
+          average_sentiment: historicalData.reduce((sum, item) => sum + item.value, 0) / historicalData.length,
+          volatility: this.calculateSentimentVolatility(historicalData.map(item => item.value)),
+          trend: this.calculateSentimentTrend(historicalData),
+          extremes: {
+            highest: Math.max(...historicalData.map(item => item.value)),
+            lowest: Math.min(...historicalData.map(item => item.value))
+          }
+        };
+      }, `histórico de ${days} dias`);
 
     } catch (error) {
       throw new Error(`Erro ao obter histórico de sentimento: ${error.message}`);
