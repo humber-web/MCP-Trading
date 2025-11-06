@@ -2,6 +2,37 @@
 // Load environment variables first (before any other imports)
 require('dotenv').config();
 
+// DEBUG: Log all environment variables that might be relevant
+console.error('\n🔍 DEBUG - Environment Variables Check:');
+console.error('==========================================');
+
+// Check for CoinGecko related variables
+const envVars = Object.keys(process.env).filter(key =>
+  key.includes('COIN') || key.includes('GECKO') || key.includes('API')
+);
+
+if (envVars.length > 0) {
+  console.error('📋 Found environment variables:');
+  envVars.forEach(key => {
+    if (key.includes('KEY') || key.includes('SECRET')) {
+      const value = process.env[key];
+      if (value && value.length > 10) {
+        console.error(`   ${key}: ${value.substring(0, 6)}...${value.substring(value.length - 4)}`);
+      } else {
+        console.error(`   ${key}: ${value || '(empty)'}`);
+      }
+    } else {
+      console.error(`   ${key}: ${process.env[key]}`);
+    }
+  });
+} else {
+  console.error('⚠️  No CoinGecko/API related environment variables found!');
+}
+
+console.error('\n🎯 Specific Check:');
+console.error(`   process.env.COINGECKO_API_KEY = ${process.env.COINGECKO_API_KEY ? 'EXISTS (length: ' + process.env.COINGECKO_API_KEY.length + ')' : 'UNDEFINED'}`);
+console.error('==========================================\n');
+
 const CommunicationHandler = require('./handlers/communication');
 const ResourcesHandler = require('./handlers/resources');
 const ToolsHandler = require('./handlers/tools');
@@ -14,6 +45,11 @@ const ExchangeFactory = require('./exchange/exchange-factory');
 const TelegramNotifier = require('./notifications/telegram-notifier');
 const TradingAgent = require('./ai/trading-agent');
 const config = require('./utils/config');
+
+// DEBUG: Check if config loaded the API key
+console.error('🔍 DEBUG - Config Object:');
+console.error(`   config.apis.coingecko.api_key = ${config.apis.coingecko.api_key ? 'EXISTS' : 'NULL/UNDEFINED'}`);
+console.error('');
 
 class CryptoTradingServer {
   constructor() {
